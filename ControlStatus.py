@@ -430,7 +430,6 @@ def tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, Te
 
 
 def test_ControlStatus():
-    #TODO: make this self-checking
     dut = tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update, TestVector3, Pulse, TestAutoClearBit, LargeVector, ListOfVectors, Status3, Pulse3)
 
     ClkCount = Signal( intbv( 0 )[32:])
@@ -466,11 +465,15 @@ def test_ControlStatus():
         yield MMwrite(Clk, tCK, A, WD, Wr, 5, 0xaa)
         yield MMwrite(Clk, tCK, A, WD, Wr, 5, 0x55)
         yield MMwrite(Clk, tCK, A, WD, Wr, 7, 0)
-        yield MMwrite(Clk, tCK, A, WD, Wr, 9, 0x6d616343)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 9, 0x6d616363)
 
-        # read it all back
+        # read back and check
+        _, myhdl09 = str2bits('MyHDL0.9')
+        cd = [ 42 << 16, 513 << 16 | 0x2, 1 , 0xcccccccc,  0x33333333, 0x55, 2, 3, 0,  0x363, 0,0,0, myhdl09 & 0xffffffff, myhdl09 >> 32,   0x6d616343   ]
         for i in range(16):
             yield MMread(Clk, tCK, A, Rd, RQ, 1, i, None, None)
+            if RQ != cd[i]:
+                print( "Fail at offset {}: {} <> {}" .format(i, cd[i], hex(RQ)) )
 
         raise StopSimulation
 
@@ -487,7 +490,7 @@ def convert():
     toVHDL.numeric_ports = False
     # Convert
     toVHDL(tcsr, Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update, TestVector3, Pulse, TestAutoClearBit, LargeVector, ListOfVectors, Status3, Pulse3)
-    toVerilog(tcsr, Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update, TestVector3, Pulse, TestAutoClearBit, LargeVector, ListOfVectors, Status3, Pulse3)
+#     toVerilog(tcsr, Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update, TestVector3, Pulse, TestAutoClearBit, LargeVector, ListOfVectors, Status3, Pulse3)
 
 
 if __name__ == '__main__':
@@ -514,6 +517,6 @@ if __name__ == '__main__':
 
 
     simulate(3000, test_ControlStatus)
-#     convert()
+    convert()
     print 'All done!'
 
