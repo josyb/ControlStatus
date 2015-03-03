@@ -5,11 +5,105 @@ Created on 13 Feb 2015
 '''
 
 from myhdl import *
-import hdlutils, SimulateAvalon
+
+# extracted utility functions
+def simulate(timesteps, mainclass):
+    """Runs simulation for MyHDL Class"""
+    # Run Simulation
+    tb = traceSignals(mainclass)
+    sim = Simulation(tb)
+    sim.run(timesteps)
 
 
+def genClk( Clk, tCK , ClkCount = None ):
+    """ generate a clock and possible associate a clockcounter with it """
+    while True:
+        Clk.next = 1
+        yield delay( int( tCK / 2 ))
+        Clk.next = 0
+        if not (ClkCount is None):
+            ClkCount.next = ClkCount + 1
+        yield delay( int( tCK / 2 ))
 
 
+def genReset(Clk, tCK, Reset):
+    """ although not strictly needed generates an asynchronous Reset with valid de-assert"""
+    Reset.next = 1
+    yield delay( int( tCK * 3.5))
+    Reset.next = 0
+
+
+def delayclks( Clk, tCK, count ):
+    """ delays 'count' 'Clk's """
+    for _ in range(count):
+        yield Clk.posedge
+    yield delay( int( tCK / 4))
+
+
+def MMwrite( Clk, tCK, A, WD, Wr, offset , data, WaitRequest = None ):
+    """ write a register """
+    WD.next = data
+    A.next = offset
+    Wr.next = 1
+    if not (WaitRequest is None):
+        yield Clk.posedge
+        while WaitRequest:
+            yield Clk.posedge
+    else:
+        yield Clk.posedge
+
+    yield delay( int( tCK / 4))
+    Wr.next = 0
+
+
+def MMread( Clk, tCK, A, Rd , RQ, READ_DELAY, offset, WaitRequest = None, result = None):
+    """ read a register
+         if waitrequest is used, READ_DELAY is ignored
+    """
+    A.next = offset
+    if WaitRequest is None:
+        Rd.next = 1
+        yield Clk.posedge
+        yield delay( int( tCK / 4))
+        Rd.next = 0     # must be a single pulse
+        for _ in range(READ_DELAY):
+            yield Clk.posedge
+        #only transfer after READ_DELAY
+        if not result is None:
+            result.next = RQ
+
+        yield delay( int( tCK / 4))
+
+    else:
+        # here we hold Rd
+        Rd.next = 1
+        while WaitRequest:
+            yield Clk.posedge
+
+        if not result is None:
+            result.next = RQ
+
+        yield delay( int( tCK / 4))
+        Rd.next = 0
+
+def mask( width, start):
+    ''' building a simple mask '''
+    return (2**width - 1) << start
+
+def str2bits( s ):
+    ''' converts a string into an integer representation to initialise an intbv with
+        trouble ahead: what will we do with a binary string like e.g. "0100_0010" (0x42)
+    '''
+    # have a 'text' string to convert
+    nrbits = len(s) * 8
+    lval = 0
+    # reverse the string
+    for i in range(len(s)-1, -1, -1):
+        lval = lval * 256 + ord(s[i])
+    return nrbits, lval
+
+
+# the RTL under scrutiny
 def regrw(OFFSET, LENGTH, START, WIDTH, Clk, Reset, A, WD, Wr, Q, Pulse = None):
     ''' the WriteRead register '''
     if WIDTH > 32:
@@ -151,7 +245,7 @@ class ControlStatus(object):
                         #mark all bits as taken
                         self.regs[offset + i][0] = 0xffffffff
             else:
-                m = hdlutils.mask( width, start)
+                m = mask( width, start)
                 if m & self.regs[offset][0]:
                     #overlapping definitions
                     raise ValueError( "Overlapping definitions {} and {}" .format(self.regs[offset][1], portname ))
@@ -180,13 +274,12 @@ class ControlStatus(object):
             raise "Can only build register file once"
         else:
             self._isbuilt = True
-            self.dr = Signal( intbv(0)[len(self.regs) * 32 :])
             # now go through the dictionary and create the writer/readers
-            rw = [] # to collect the created registers
-            ro = [] # to collect the created registers
+            rw  = [] # to collect the created registers
+            ro  = [] # to collect the created registers
             roa = [] # to collect the created registers
             rwc = [] # to collect the created registers
-            ac = [] # to collect the created registers
+            ac  = [] # to collect the created registers
             for key in self._dict.keys():
                 ioffset = self._dict[key]['offset']
                 ilength = self._dict[key]['length']
@@ -209,7 +302,7 @@ class ControlStatus(object):
 
                     elif isinstance(srcdst , str) :
                         # replace it by a signal
-                        n,v = hdlutils.str2bits(srcdst)
+                        n,v = str2bits(srcdst)
                         if n <= iwidth:
                             self._dict[key].update( { 'srcdst' :  Signal( intbv( v )[iwidth:]) } )
                         else:
@@ -337,47 +430,47 @@ def tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, Te
 
 
 def test_ControlStatus():
-
-    hw_inst = tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update, TestVector3, Pulse, TestAutoClearBit, LargeVector, ListOfVectors, Status3, Pulse3)
+    #TODO: make this self-checking
+    dut = tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update, TestVector3, Pulse, TestAutoClearBit, LargeVector, ListOfVectors, Status3, Pulse3)
 
     ClkCount = Signal( intbv( 0 )[32:])
     tCK = 20
 
     @instance
     def clkgen():
-        yield hdlutils.genClk(Clk, tCK, ClkCount)
+        yield genClk(Clk, tCK, ClkCount)
 
 
     @instance
     def resetgen():
-        yield hdlutils.genReset(Clk, tCK, Reset)
+        yield genReset(Clk, tCK, Reset)
 
     @instance
     def stimulus():
-        yield hdlutils.delayclks(Clk, tCK, 10)
+        yield delayclks(Clk, tCK, 10)
         Status.next = 1
         Status2.next = 2
         Status3.next = 3
         for i in range(16):
-            yield SimulateAvalon.MMread(Clk, tCK, A, Rd, RQ, 1, i, None, None)
+            yield MMread(Clk, tCK, A, Rd, RQ, 1, i, None, None)
 
         # write a few things
-        yield SimulateAvalon.MMwrite(Clk, tCK, A, WD, Wr, 0, 1)
-        yield hdlutils.delayclks(Clk, tCK, 2)
-        yield SimulateAvalon.MMwrite(Clk, tCK, A, WD, Wr, 0, 0)
-        yield SimulateAvalon.MMwrite(Clk, tCK, A, WD, Wr, 0, 4)
-        yield SimulateAvalon.MMwrite(Clk, tCK, A, WD, Wr, 1, 513 << 16 | 0x1)
-        yield SimulateAvalon.MMwrite(Clk, tCK, A, WD, Wr, 1, 513 << 16 | 0x2)
-        yield SimulateAvalon.MMwrite(Clk, tCK, A, WD, Wr, 3, 0xcccccccc)
-        yield SimulateAvalon.MMwrite(Clk, tCK, A, WD, Wr, 4, 0x33333333)
-        yield SimulateAvalon.MMwrite(Clk, tCK, A, WD, Wr, 5, 0xaa)
-        yield SimulateAvalon.MMwrite(Clk, tCK, A, WD, Wr, 5, 0x55)
-        yield SimulateAvalon.MMwrite(Clk, tCK, A, WD, Wr, 7, 0)
-        yield SimulateAvalon.MMwrite(Clk, tCK, A, WD, Wr, 9, 0x6d616343)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 0, 1)
+        yield delayclks(Clk, tCK, 2)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 0, 0)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 0, 4)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 1, 513 << 16 | 0x1)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 1, 513 << 16 | 0x2)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 3, 0xcccccccc)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 4, 0x33333333)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 5, 0xaa)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 5, 0x55)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 7, 0)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 9, 0x6d616343)
 
         # read it all back
         for i in range(16):
-            yield SimulateAvalon.MMread(Clk, tCK, A, Rd, RQ, 1, i, None, None)
+            yield MMread(Clk, tCK, A, Rd, RQ, 1, i, None, None)
 
         raise StopSimulation
 
@@ -400,27 +493,27 @@ def convert():
 if __name__ == '__main__':
     WIDTH_A = 8
 
-    Clk = Signal(bool(0))
-    Reset = ResetSignal(0, active=1, async=True)
-    A = Signal(intbv(0)[WIDTH_A:])
-    WD, RQ = [Signal(intbv(0)[32:]) for _ in range(2)]
-    Wr , Rd = [ Signal(bool(0)) for _ in range(2) ]
-    Status = Signal(intbv(0)[32:])
-    Status2 = Signal(intbv(0)[32:])
-    Pulse = Signal(bool(0))
-    Status3 = Signal(intbv(0)[16:])
-    Pulse3 = Signal(bool(0))
-    TestAutoClearBit = Signal(bool(0))
-    TestBit = Signal(bool(0))
-    TestVector = Signal(intbv(0)[10:])
-    TestVector2 = Signal(intbv(0)[16:])
-    TestVector3 = Signal(intbv(0)[12:])
-    LargeVector = Signal(intbv(0)[72:])
-    ListOfVectors = Signal(intbv(0)[3 * 24:])
-    Update = Signal(bool(0))
+    Clk                 = Signal(bool(0))
+    Reset               = ResetSignal(0, active=1, async=True)
+    A                   = Signal(intbv(0)[WIDTH_A:])
+    WD, RQ              = [Signal(intbv(0)[32:]) for _ in range(2)]
+    Wr , Rd             = [Signal(bool(0)) for _ in range(2)]
+    Status              = Signal(intbv(0)[32:])
+    Status2             = Signal(intbv(0)[32:])
+    Pulse               = Signal(bool(0))
+    Status3             = Signal(intbv(0)[16:])
+    Pulse3              = Signal(bool(0))
+    TestAutoClearBit    = Signal(bool(0))
+    TestBit             = Signal(bool(0))
+    TestVector          = Signal(intbv(0)[10:])
+    TestVector2         = Signal(intbv(0)[16:])
+    TestVector3         = Signal(intbv(0)[12:])
+    LargeVector         = Signal(intbv(0)[72:])
+    ListOfVectors       = Signal(intbv(0)[3 * 24:])
+    Update              = Signal(bool(0))
 
 
-    hdlutils.simulate(3000, test_ControlStatus)
-    convert()
+    simulate(3000, test_ControlStatus)
+#     convert()
     print 'All done!'
 
