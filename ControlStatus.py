@@ -3,12 +3,17 @@ Created on 13 Feb 2015
 
 @author: Josy
 '''
-
+import os
 from myhdl import *
 
 # extracted utility functions
 def simulate(timesteps, mainclass):
     """Runs simulation for MyHDL Class"""
+    # Remove old vcd File, otherwise we get a list of renamed .vcd files lingering about
+    filename = (mainclass.__name__ +".vcd")
+    if os.access(filename,  os.F_OK):
+        os.unlink(filename)
+
     # Run Simulation
     tb = traceSignals(mainclass)
     sim = Simulation(tb)
@@ -199,27 +204,34 @@ class ControlStatus(object):
     #        ) ;
 
 
-    def __init__(self):
+    def __init__(self, description = None):
         ''' '''
         # initially we don't do much more then starting a dictionary
         self._dict = {}
         self._isbuilt = False
         self.regs = []
+        if not description is None:
+            for desc in description:
+                self.addentry(desc[0], desc[1], desc[2], desc[3], desc[4], desc[5] if len(desc) > 5 else None)
 
-    def addentry(self, portname, offset, length, start, width, mode, srcdst, pulse = None):
+    def regcount(self):
+        ''' this gives the current used number of 32-bit registers '''
+        return len(self.regs)
+
+    def addentry(self, portname, offset, start, mode, srcdst, pulse = None):
         '''
             add an entry in the register file
                 portname: obvious
                 offset: relative to 0, in words (of 32 bits)
-                length: number of registers occupied
                 start: offset in bits relative to bit 0 starting at offset
-                width: the width of the field, can straddle over 32 bit boundaries, e.g. to describe a MAC address e.a. (even for 'array' types)
                 mode: what we can do
                     WriteRead: writing generates an update signal, reading is silent
                     ReadOnly: silent reading of info with no sidesignals
                     ReadOnlyAck: will also generate an update pulse to e.g. acknowledge reading from a Fifo
                     AutoClear: the bit(s) written will only last for one clock period
                 srcdst: in case of a ReadOnly or a ReadOnlyAck this must be the vector to be read
+                        for write registers, this is the receiving Signal
+                        for constants this must be a tuple( constant_value, bitwidth)
                 pulse: in case an update or an acknowledge pulse is required
             Note that is allowed to reuse the same offset (and length) to define sub-fields with their own names
             to efficiently pack things a bit together. Caveat Scribor!
@@ -227,17 +239,73 @@ class ControlStatus(object):
             Note that we do it little-endian over here (I never understood the benefits of big-endian ...)
         '''
 
-
         if isinstance(srcdst,list):
-            print( "{} is a List of Signals" .format(srcdst))
-        else:
+            lenlov    = len(srcdst)
+            lenvector = len(srcdst[0])
+            lenentry  = (lenvector + 31) / 32
+            lenregs   = lenlov * lenentry
             # see if we have to extend
-            if len(self.regs) < (offset + length):
-                for _ in range(offset + length - len(self.regs)):
+            if len(self.regs) < (offset + lenregs):
+                for _ in range(offset + lenregs - len(self.regs)):
+                    self.regs.append( [0, portname] ) # not yet occupied
+
+            # must check if they are free
+            for i in range(lenregs):
+                    if self.regs[offset + i][0] :
+                        # already taken
+                        raise ValueError( "Overlapping definitions {} and {}" .format(self.regs[offset+i][1], portname ))
+                    else:
+                        #mark all bits as taken
+                        self.regs[offset + i][0] = 0xffffffff
+
+            # if the pulse is also a list ...
+            if isinstance(pulse, list):
+                npulse = pulse
+            else:
+                npulse = []
+                for _ in range(lenlov - 1):
+                    npulse.append( None )
+                npulse.append( pulse )
+
+            # add in the dictionary
+            for i in range( lenlov ):
+                nname = '{}{}' .format(portname,i)
+                if not nname in self._dict:
+                    self._dict[ nname] = {  'isout'  : mode in ('WriteRead', 'AutoClear'),
+                                            'offset' : offset + i,
+                                            'length' : lenentry,
+                                            'start'  : start,
+                                            'width'  : lenvector,
+                                            'mode'   : mode,
+                                            'srcdst' : srcdst[i],
+                                            'pulse'  : npulse[i],
+                                            'isig'   : None
+                                            }
+                else:
+                    raise ValueError( "Port {} already set in dictionary" .format( portname ))
+
+        else:
+            if isinstance(srcdst, (int, tuple)):
+                # get length from second element in tuple
+                lenvector = srcdst[1]
+                lenregs = (lenvector + 31) / 32
+
+            elif isinstance(srcdst, intbv):
+                # receiving a bitstring, already converted by MyHDL intbv()
+                lenvector = len(srcdst)
+                lenregs = (lenvector + 31) / 32
+
+            else:
+                lenvector = len(srcdst)
+                lenregs = (lenvector + 31) / 32
+
+            # see if we have to extend
+            if len(self.regs) < (offset + lenregs):
+                for _ in range(offset + lenregs - len(self.regs)):
                     self.regs.append( [0, portname] ) # not yet occupied
             # check / flag the used bits
-            if width > 32 :
-                for i in range(length):
+            if lenvector > 32 :
+                for i in range(lenregs):
                     if self.regs[offset + i][0] :
                         # already taken
                         raise ValueError( "Overlapping definitions {} and {}" .format(self.regs[offset+i][1], portname ))
@@ -245,7 +313,7 @@ class ControlStatus(object):
                         #mark all bits as taken
                         self.regs[offset + i][0] = 0xffffffff
             else:
-                m = mask( width, start)
+                m = mask( lenvector, start)
                 if m & self.regs[offset][0]:
                     #overlapping definitions
                     raise ValueError( "Overlapping definitions {} and {}" .format(self.regs[offset][1], portname ))
@@ -253,22 +321,27 @@ class ControlStatus(object):
                     # add bits for later checks
                     self.regs[offset][0] |= m
 
-
             # add description to the dictionary
             if not portname in self._dict:
-                self._dict[ portname] = {'isout' : mode in ('WriteRead', 'AutoClear'),
-                                         'offset' : offset, 'length' : length,
-                                         'start' : start, 'width' : width, 'mode' : mode,
-                                         'srcdst' : srcdst, 'pulse' : pulse,
-                                         'isig' : None
+                self._dict[ portname] = {'isout'  : mode in ('WriteRead', 'AutoClear'),
+                                         'offset' : offset,
+                                         'length' : lenregs,
+                                         'start'  : start,
+                                         'width'  : lenvector,
+                                         'mode'   : mode,
+                                         'srcdst' : srcdst,
+                                         'pulse'  : pulse,
+                                         'isig'   : None
                                          }
             else:
                 raise ValueError( "Port {} already set in dictionary" .format( portname ))
 
+
+    # these can only be called when all entries have been added
+    # which is a reasonable requirement
+
     def build(self, Clk, Reset, A, WD, Wr, Rd, RQ):
         ''' the actual process of instantiating the registers '''
-
-
 
         if self._isbuilt:
             raise "Can only build register file once"
@@ -296,17 +369,25 @@ class ControlStatus(object):
                     rw.append( regrw( ioffset , ilength , istart, iwidth , Clk, Reset, A, WD, Wr, self._dict[key]['isig'], self._dict[key]['pulse'] ) )
 
                 elif ccmode == 'ReadOnly':
-                    if isinstance(srcdst, (int, long)):
-                        # make an intbv
-                        self._dict[key].update( { 'srcdst' :  Signal( intbv(srcdst )[iwidth:]) } )
+                    if isinstance(srcdst, tuple):
+                        if isinstance(srcdst[0], (int, long)):
+                            # make an intbv
+                            self._dict[key].update( { 'srcdst' :  Signal( intbv( srcdst[0] )[iwidth:]) } )
 
-                    elif isinstance(srcdst , str) :
-                        # replace it by a signal
-                        n,v = str2bits(srcdst)
-                        if n <= iwidth:
-                            self._dict[key].update( { 'srcdst' :  Signal( intbv( v )[iwidth:]) } )
-                        else:
-                            raise ValueError( "Converted String {} having {} bits does not fit in {} bits" .format( srcdst, n, iwidth ))
+                        elif isinstance(srcdst[0] , str) :
+                            # replace it by a signal
+                            n,v = str2bits(srcdst[0])
+                            if n <= iwidth:
+                                self._dict[key].update( { 'srcdst' :  Signal( intbv( v )[iwidth:]) } )
+                            else:
+                                raise ValueError( "Converted String {} having {} bits does not fit in specified {} bits" .format( srcdst, n, iwidth ))
+
+                    elif isinstance(srcdst, intbv):
+                            self._dict[key].update( { 'srcdst' :  Signal( srcdst ) } )
+
+                    else:
+                        # a readonly Signal doesn't need any special actions
+                        pass
 
                 elif ccmode == 'ReadOnlyAck':
                     # create the pulse
@@ -361,9 +442,6 @@ class ControlStatus(object):
 
         return rw, ro, roa, rwc, ac, ccassigns, rdr
 
-    # these can only be called when all entries have been added
-    # which is a reasonable requirement
-
     # not - public?
     def _MMread(self, Clk, Reset, A, Rd, RQ):
         ''' our (Avalon MM) Master reading (back) '''
@@ -384,6 +462,15 @@ class ControlStatus(object):
         pass
 
 
+def flatten( lov, f):
+    @always_comb
+    def fl():
+        for i in range(len(lov)):
+            f.next[(i+1)*24:i*24] = lov[i]
+
+    return fl
+
+
 def tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2, Update, TestVector3,  Pulse, TestAutoClearBit, LargeVector, ListOfVectors, Status3, Pulse3):
     ''' a routine to actually build a csr
         both for Simulation and Conversion
@@ -393,41 +480,72 @@ def tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, Te
     # as this is top file to be converted
     llov = [Signal(intbv(0)[24:]) for _ in range(3)]
 
-    @always_comb
-    def mimic():
-        for i in range(3):
-            ListOfVectors.next[(i+1)*24:i*24] = llov[i]
+    if not USE_LIST:
+        # initialise the control/status object
+        csr = ControlStatus()
+        # Add the definitions one by one
+        # These fields can be set in random order
+        # but for sanity reasons, better keep the offsets in sequence
+        # The addentry function does some checking, but e.g. the optional update pulses are not checked
+        # for double use, simulation will work, but the (VHDL) conversion will raise a 'multiple drivers' error
+        # The 'length' and 'width' could be inferred from the Signals themselves
+        # except for constants where we could use a tuple and also specify the desired width
+        # unfortunately Signals have no name assigned here, so we still need the 'double' reference
+        csr.addentry('TestBit'            ,  0,    0, 'WriteRead'             , TestBit)
+        csr.addentry('TestAutoClearBit'   ,  0,    2, 'AutoClear'             , TestAutoClearBit)
+        csr.addentry('TestVector'         ,  1,    0, 'WriteRead'             , TestVector )
+        csr.addentry('TestVector2'        ,  1,   16, 'WriteRead'             , TestVector2 )
+        csr.addentry('Status'             ,  2,    0, 'ReadOnly'              , Status)
+        # large parameters (> 32 bits) have to start from 0
+        csr.addentry('LargeVector'        ,  3,    0, 'WriteRead'             , LargeVector )
+        csr.addentry('Status2'            ,  6,    0, 'ReadOnlyAck'           , Status2, Pulse)
+        csr.addentry('Status3'            ,  7,    0, 'ReadOnlyWriteClear'    , Status3, Pulse3)
+        # leaving a large gap to pad up (48 bits)
+        csr.addentry('TestVector3'        ,  9,    0, 'WriteRead'             , TestVector3)
+        # Mimic a 1D*1D type
+        # The optional update pulse is only active at the last sub-register,
+        # unless it is a list of equal dimension too (Tip: specify None for unused ones)
+        csr.addentry('ListOfVectors'      , 10,    0, 'WriteRead'             , llov, [None, Update, None])
+        # Finally we have some 'constant' data, like e.g. Version Numbers
+        csr.addentry('41'                 ,  0,   16, 'ReadOnly'              , (42,8)) # "0100_0010") # trying a constant !this is now broken!
+        csr.addentry('BitString'          ,  0,   24, 'ReadOnly'              , intbv("0100_0010"))
+        csr.addentry('MyHDL'              , 13,    0, 'ReadOnly'              , ('MyHDL0.9', 64)) # trying another constant
+        csr.addentry('C-Cam'              , 15,    0, 'ReadOnly'              , ('Ccam', 32)) # trying another constant
 
-    # initialise the control/status object
-    csr = ControlStatus()
-    # add the definitions one by one
-    # these fields can be set in random order
-    # but for sanity reasons, better keep the offsets in sequence
-    csr.addentry('TestBit'            ,  0, 1,    0,  1, 'WriteRead'             , TestBit)
-    csr.addentry('TestAutoClearBit'   ,  0, 1,    2,  1, 'AutoClear'             , TestAutoClearBit)
-    csr.addentry('TestVector'         ,  1, 1,    0,  2, 'WriteRead'             , TestVector )
-    csr.addentry('TestVector2'        ,  1, 1,   16, 16, 'WriteRead'             , TestVector2, Update )
-    csr.addentry('Status'             ,  2, 1,    0, 32, 'ReadOnly'              , Status)
-    # large parameters (> 32 bits) have to start from 0
-    csr.addentry('LargeVector'        ,  3, 3,    0, 72, 'WriteRead'             , LargeVector )
-    csr.addentry('Status2'            ,  6, 1,    0, 32, 'ReadOnlyAck'           , Status2, Pulse)
-    csr.addentry('Status3'            ,  7, 1,    0, 16, 'ReadOnlyWriteClear'    , Status3, Pulse3)
-    # leaving a large gap to pad up
-    csr.addentry('TestVector3'        ,  9, 1,    0, 12, 'WriteRead'             , TestVector3)
-    # ListOfSignals are a 1D*1D type
-#     for i in range(3):
-#         csr.addentry('ListOfVectors{}'.format(i), 10 + i, 1, 0, 24, 'WriteRead'   , llov[i])
-    csr.addentry('ListOfVectors'      , 10, 3,    0, 24, 'WriteRead'             , llov)
-    # deliberately using the 'last' address for our 'Signature'
-    csr.addentry('BitString'          ,  0, 1,   16,  8, 'ReadOnly'              , 42) # "0100_0010") # trying a constant !this is now broken!
-    csr.addentry('MyHDL'              , 13, 2,    0, 64, 'ReadOnly'              , 'MyHDL0.9') # trying another constant
-    csr.addentry('C-Cam'              , 15, 1,    0, 32, 'ReadOnly'              , 'Ccam') # trying another constant
+    else:
+        # build a list of descriptors
+        description =  (('TestBit'            ,  0,    0, 'WriteRead'             , TestBit),
+                        ('TestAutoClearBit'   ,  0,    2, 'AutoClear'             , TestAutoClearBit),
+                        ('TestVector'         ,  1,    0, 'WriteRead'             , TestVector ),
+                        ('TestVector2'        ,  1,   16, 'WriteRead'             , TestVector2 ),
+                        ('Status'             ,  2,    0, 'ReadOnly'              , Status),
+                        # large parameters (> 32 bits) have to start from 0
+                        ('LargeVector'        ,  3,    0, 'WriteRead'             , LargeVector ),
+                        ('Status2'            ,  6,    0, 'ReadOnlyAck'           , Status2, Pulse),
+                        ('Status3'            ,  7,    0, 'ReadOnlyWriteClear'    , Status3, Pulse3),
+                        # leaving a large gap to pad up (48 bits)
+                        ('TestVector3'        ,  9,    0, 'WriteRead'             , TestVector3),
+                        # Mimic a 1D*1D type
+                        # The optional update pulse is only active at the last sub-register,
+                        # unless it is a list of equal dimension too (Tip: specify None for unused ones)
+                        ('ListOfVectors'      , 10,    0, 'WriteRead'             , llov, [None, Update, None]),
+                        # Finally we have some 'constant' data, like e.g. Version Numbers
+                        ('41'                 ,  0,   16, 'ReadOnly'              , (42,8)), # "0100_0010") # trying a constant !this is now broken!
+                        ('BitString'          ,  0,   24, 'ReadOnly'              , intbv("0100_0010")),
+                        ('MyHDL'              , 13,    0, 'ReadOnly'              , ('MyHDL0.9', 64)), # trying another constant
+                        ('C-Cam'              , 15,    0, 'ReadOnly'              , ('Ccam', 32)) # trying another constant
+                       )
+        # and pass this list to the constructor
+        csr = ControlStatus( description )
 
     # this will build the control and status register
+    # at the moment the width of A is a chicken-or-egg issue
     control = csr.build(Clk, Reset, A, WD, Wr, Rd, RQ)
+    # flatten the generated ListOfVectors in to one vector
+    # this is only required here as this is a top-level module
+    mimic = flatten( llov, ListOfVectors )
 
     return control, mimic
-
 
 def test_ControlStatus():
     dut = tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update, TestVector3, Pulse, TestAutoClearBit, LargeVector, ListOfVectors, Status3, Pulse3)
@@ -438,7 +556,6 @@ def test_ControlStatus():
     @instance
     def clkgen():
         yield genClk(Clk, tCK, ClkCount)
-
 
     @instance
     def resetgen():
@@ -454,22 +571,25 @@ def test_ControlStatus():
             yield MMread(Clk, tCK, A, Rd, RQ, 1, i, None, None)
 
         # write a few things
-        yield MMwrite(Clk, tCK, A, WD, Wr, 0, 1)
+        yield MMwrite(Clk, tCK, A, WD, Wr,  0, 1)
         yield delayclks(Clk, tCK, 2)
-        yield MMwrite(Clk, tCK, A, WD, Wr, 0, 0)
-        yield MMwrite(Clk, tCK, A, WD, Wr, 0, 4)
-        yield MMwrite(Clk, tCK, A, WD, Wr, 1, 513 << 16 | 0x1)
-        yield MMwrite(Clk, tCK, A, WD, Wr, 1, 513 << 16 | 0x2)
-        yield MMwrite(Clk, tCK, A, WD, Wr, 3, 0xcccccccc)
-        yield MMwrite(Clk, tCK, A, WD, Wr, 4, 0x33333333)
-        yield MMwrite(Clk, tCK, A, WD, Wr, 5, 0xaa)
-        yield MMwrite(Clk, tCK, A, WD, Wr, 5, 0x55)
-        yield MMwrite(Clk, tCK, A, WD, Wr, 7, 0)
-        yield MMwrite(Clk, tCK, A, WD, Wr, 9, 0x6d616363)
+        yield MMwrite(Clk, tCK, A, WD, Wr,  0, 0)
+        yield MMwrite(Clk, tCK, A, WD, Wr,  0, 4)
+        yield MMwrite(Clk, tCK, A, WD, Wr,  1, 513 << 16 | 0x1)
+        yield MMwrite(Clk, tCK, A, WD, Wr,  1, 513 << 16 | 0x2)
+        yield MMwrite(Clk, tCK, A, WD, Wr,  3, 0xcccccccc)
+        yield MMwrite(Clk, tCK, A, WD, Wr,  4, 0x33333333)
+        yield MMwrite(Clk, tCK, A, WD, Wr,  5, 0xaa)
+        yield MMwrite(Clk, tCK, A, WD, Wr,  5, 0x55)
+        yield MMwrite(Clk, tCK, A, WD, Wr,  7, 0)
+        yield MMwrite(Clk, tCK, A, WD, Wr,  9, 0x6d616363)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 10, 0x10)
+        yield MMwrite(Clk, tCK, A, WD, Wr, 11, 0x20)
+        yield MMwrite(Clk, tCK, A, WD, Wr ,12, 0x30)
 
         # read back and check
         _, myhdl09 = str2bits('MyHDL0.9')
-        cd = [ 42 << 16, 513 << 16 | 0x2, 1 , 0xcccccccc,  0x33333333, 0x55, 2, 3, 0,  0x363, 0,0,0, myhdl09 & 0xffffffff, myhdl09 >> 32,   0x6d616343   ]
+        cd = [ (0x42 << 24) + (42 << 16), 513 << 16 | 0x2, 1 , 0xcccccccc,  0x33333333, 0x55, 2, 3, 0,  0x6d616363, 0x10, 0x20, 0x30 , myhdl09 & 0xffffffff, myhdl09 >> 32,   0x6d616343   ]
         for i in range(16):
             yield MMread(Clk, tCK, A, Rd, RQ, 1, i, None, None)
             if RQ != cd[i]:
@@ -482,11 +602,11 @@ def test_ControlStatus():
 
 def convert():
 
-    # as this is an 'internal module' ( i.e. not exposed to Qsys)
+    # As this is an 'internal module' ( i.e. not exposed to Qsys)
     # we can stick to use unsigned vectors as  ports
     # but eventually some of the ports will come from the top-level module (exposed to Qsys)
     # and will not be 'numeric'
-    # force std_logic_vectors instead of unsigned in Interface
+    # Force std_logic_vector ports instead of unsigned ports
     toVHDL.numeric_ports = False
     # Convert
     toVHDL(tcsr, Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update, TestVector3, Pulse, TestAutoClearBit, LargeVector, ListOfVectors, Status3, Pulse3)
@@ -510,11 +630,12 @@ if __name__ == '__main__':
     TestBit             = Signal(bool(0))
     TestVector          = Signal(intbv(0)[10:])
     TestVector2         = Signal(intbv(0)[16:])
-    TestVector3         = Signal(intbv(0)[12:])
+    TestVector3         = Signal(intbv(0)[32:])
     LargeVector         = Signal(intbv(0)[72:])
     ListOfVectors       = Signal(intbv(0)[3 * 24:])
     Update              = Signal(bool(0))
 
+    USE_LIST = True
 
     simulate(3000, test_ControlStatus)
     convert()
