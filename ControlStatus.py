@@ -3,93 +3,13 @@ Created on 13 Feb 2015
 
 @author: Josy
 '''
+from __future__ import print_function
+
 import os
+import sys
+
 from myhdl import *
 
-# extracted utility functions
-def simulate(timesteps, mainclass):
-    """Runs simulation for MyHDL Class"""
-    # Remove old vcd File, otherwise we get a list of renamed .vcd files lingering about
-    filename = (mainclass.__name__ +".vcd")
-    if os.access(filename,  os.F_OK):
-        os.unlink(filename)
-
-    # Run Simulation
-    tb = traceSignals(mainclass)
-    sim = Simulation(tb)
-    sim.run(timesteps)
-
-
-def genClk( Clk, tCK , ClkCount = None ):
-    """ generate a clock and possible associate a clockcounter with it """
-    while True:
-        Clk.next = 1
-        yield delay( int( tCK / 2 ))
-        Clk.next = 0
-        if not (ClkCount is None):
-            ClkCount.next = ClkCount + 1
-        yield delay( int( tCK / 2 ))
-
-
-def genReset(Clk, tCK, Reset):
-    """ although not strictly needed generates an asynchronous Reset with valid de-assert"""
-    Reset.next = 1
-    yield delay( int( tCK * 3.5))
-    Reset.next = 0
-
-
-def delayclks( Clk, tCK, count ):
-    """ delays 'count' 'Clk's """
-    for _ in range(count):
-        yield Clk.posedge
-    yield delay( int( tCK / 4))
-
-
-def MMwrite( Clk, tCK, A, WD, Wr, offset , data, WaitRequest = None ):
-    """ write a register """
-    WD.next = data
-    A.next = offset
-    Wr.next = 1
-    if not (WaitRequest is None):
-        yield Clk.posedge
-        while WaitRequest:
-            yield Clk.posedge
-    else:
-        yield Clk.posedge
-
-    yield delay( int( tCK / 4))
-    Wr.next = 0
-
-
-def MMread( Clk, tCK, A, Rd , RQ, READ_DELAY, offset, WaitRequest = None, result = None):
-    """ read a register
-         if waitrequest is used, READ_DELAY is ignored
-    """
-    A.next = offset
-    if WaitRequest is None:
-        Rd.next = 1
-        yield Clk.posedge
-        yield delay( int( tCK / 4))
-        Rd.next = 0     # must be a single pulse
-        for _ in range(READ_DELAY):
-            yield Clk.posedge
-        #only transfer after READ_DELAY
-        if not result is None:
-            result.next = RQ
-
-        yield delay( int( tCK / 4))
-
-    else:
-        # here we hold Rd
-        Rd.next = 1
-        while WaitRequest:
-            yield Clk.posedge
-
-        if not result is None:
-            result.next = RQ
-
-        yield delay( int( tCK / 4))
-        Rd.next = 0
 
 def mask( width, start):
     ''' building a simple mask '''
@@ -98,6 +18,7 @@ def mask( width, start):
 def str2bits( s ):
     ''' converts a string into an integer representation to initialise an intbv with
         trouble ahead: what will we do with a binary string like e.g. "0100_0010" (0x42)
+        we could check if it contains only 0, 1 or _
     '''
     # have a 'text' string to convert
     nrbits = len(s) * 8
@@ -108,23 +29,23 @@ def str2bits( s ):
     return nrbits, lval
 
 
-# the RTL under scrutiny
-def regrw(OFFSET, LENGTH, START, WIDTH, Clk, Reset, A, WD, Wr, Q, Pulse = None):
+# the pertinent RTL
+def regrw( OFFSET, LENGTH, START, WIDTH, Clk, Reset, A, WD, Wr, Q, Pulse = None, BUSWIDTH = 32):
     ''' the WriteRead register '''
-    if WIDTH > 32:
+
+    if WIDTH > BUSWIDTH:
         if START != 0:
-            raise ValueError(" Start should be zero for large (>32 bits) vectors")
+            raise ValueError(" Start should be zero for large (>'BUSWIDTH' bits) vectors")
 
         @always_seq( Clk.posedge, reset = Reset)
         def ccregrw():
-            if Wr and (A >= OFFSET) and (A < OFFSET+LENGTH):
-                for i in range((WIDTH + 31) // 32):
-                    if A == OFFSET + i:
-                        if i != (WIDTH+31)//32 - 1:
-                            Q.next[(i+1)*32:i*32] = WD
+            for i in range((WIDTH + BUSWIDTH - 1) // BUSWIDTH):
+                if Wr and A == OFFSET +i:
+                    if i != (WIDTH + BUSWIDTH - 1) // BUSWIDTH - 1:
+                        Q.next[(i+1) * BUSWIDTH : i * BUSWIDTH] = WD
                         else:
                             # may have to assign a slice for the last iteration
-                            Q.next[:(WIDTH // 32) * 32] = WD[WIDTH % 32:]
+                        Q.next[:(WIDTH // BUSWIDTH) * BUSWIDTH] = WD[WIDTH % BUSWIDTH:]
     else :
         @always_seq( Clk.posedge, reset = Reset)
         def ccregrw():
@@ -204,35 +125,37 @@ class ControlStatus(object):
     #        ) ;
 
 
-    def __init__(self, description = None):
+    def __init__(self, description = None, BUSWIDTH = 32):
         ''' '''
         # initially we don't do much more then starting a dictionary
         self._dict = {}
         self._isbuilt = False
         self.regs = []
+        self.BUSWIDTH = BUSWIDTH
         if not description is None:
             for desc in description:
                 self.addentry(desc[0], desc[1], desc[2], desc[3], desc[4], desc[5] if len(desc) > 5 else None)
 
     def regcount(self):
-        ''' this gives the current used number of 32-bit registers '''
+        ''' this gives the current used number of registers '''
         return len(self.regs)
 
     def addentry(self, portname, offset, start, mode, srcdst, pulse = None):
         '''
             add an entry in the register file
                 portname: obvious
-                offset: relative to 0, in words (of 32 bits)
+                offset: relative to 0, in words (of BUSWIDTH bits)
                 start: offset in bits relative to bit 0 starting at offset
                 mode: what we can do
-                    WriteRead: writing generates an update signal, reading is silent
-                    ReadOnly: silent reading of info with no sidesignals
-                    ReadOnlyAck: will also generate an update pulse to e.g. acknowledge reading from a Fifo
-                    AutoClear: the bit(s) written will only last for one clock period
-                srcdst: in case of a ReadOnly or a ReadOnlyAck this must be the vector to be read
+                    WriteRead:             writing can generate an update signal, reading (back) is silent
+                    ReadOnly:              silent reading of info with no sidesignals
+                    ReadOnlyAck:           will also generate an update pulse to e.g. acknowledge reading from a Fifo
+                    AutoClear:             the bit(s) written will only last for one clock period
+                    ReadOnlyWriteClear :   any write sends a 'clr' pulse
+                srcdst: in case of a ReadOnly, ReadOnlyAck or ReadOnlyWriteClear this must be the vector to be read
                         for write registers, this is the receiving Signal
-                        for constants this must be a tuple( constant_value, bitwidth)
-                pulse: in case an update or an acknowledge pulse is required
+                        for constants this must be a tuple( constant_value, bitwidth )
+                pulse: in case an update, acknowledge or clear pulse is required
             Note that is allowed to reuse the same offset (and length) to define sub-fields with their own names
             to efficiently pack things a bit together. Caveat Scribor!
 
@@ -242,7 +165,7 @@ class ControlStatus(object):
         if isinstance(srcdst,list):
             lenlov    = len(srcdst)
             lenvector = len(srcdst[0])
-            lenentry  = (lenvector + 31) / 32
+            lenentry  = (lenvector + self.BUSWIDTH - 1) / self.BUSWIDTH
             lenregs   = lenlov * lenentry
             # see if we have to extend
             if len(self.regs) < (offset + lenregs):
@@ -288,23 +211,23 @@ class ControlStatus(object):
             if isinstance(srcdst, (int, tuple)):
                 # get length from second element in tuple
                 lenvector = srcdst[1]
-                lenregs = (lenvector + 31) / 32
+                lenregs = (lenvector + self.BUSWIDTH - 1) / self.BUSWIDTH
 
             elif isinstance(srcdst, intbv):
                 # receiving a bitstring, already converted by MyHDL intbv()
                 lenvector = len(srcdst)
-                lenregs = (lenvector + 31) / 32
+                lenregs = (lenvector + self.BUSWIDTH - 1) / self.BUSWIDTH
 
             else:
                 lenvector = len(srcdst)
-                lenregs = (lenvector + 31) / 32
+                lenregs = (lenvector + self.BUSWIDTH - 1) / self.BUSWIDTH
 
             # see if we have to extend
             if len(self.regs) < (offset + lenregs):
                 for _ in range(offset + lenregs - len(self.regs)):
                     self.regs.append( [0, portname] ) # not yet occupied
             # check / flag the used bits
-            if lenvector > 32 :
+            if lenvector > self.BUSWIDTH :
                 for i in range(lenregs):
                     if self.regs[offset + i][0] :
                         # already taken
@@ -369,24 +292,26 @@ class ControlStatus(object):
                     rw.append( regrw( ioffset , ilength , istart, iwidth , Clk, Reset, A, WD, Wr, self._dict[key]['isig'], self._dict[key]['pulse'] ) )
 
                 elif ccmode == 'ReadOnly':
+                    # we insert the readonly object (signal, intbv, str) in the readback vector
                     if isinstance(srcdst, tuple):
                         if isinstance(srcdst[0], (int, long)):
                             # make an intbv
-                            self._dict[key].update( { 'srcdst' :  Signal( intbv( srcdst[0] )[iwidth:]) } )
+                            self._dict[key].update( { 'srcdst' :  intbv( srcdst[0] )[iwidth:] } )
 
                         elif isinstance(srcdst[0] , str) :
-                            # replace it by a signal
+                            # replace it by an intbv
                             n,v = str2bits(srcdst[0])
                             if n <= iwidth:
-                                self._dict[key].update( { 'srcdst' :  Signal( intbv( v )[iwidth:]) } )
+                                self._dict[key].update( { 'srcdst' :   intbv( v )[iwidth:] } )
                             else:
                                 raise ValueError( "Converted String {} having {} bits does not fit in specified {} bits" .format( srcdst, n, iwidth ))
 
                     elif isinstance(srcdst, intbv):
-                            self._dict[key].update( { 'srcdst' :  Signal( srcdst ) } )
+                        # well defined
+                            pass
 
                     else:
-                        # a readonly Signal doesn't need any special actions
+                        # must be a Signal
                         pass
 
                 elif ccmode == 'ReadOnlyAck':
@@ -399,7 +324,7 @@ class ControlStatus(object):
 
                 elif ccmode == 'AutoClear':
                     if ilength > 1:
-                        raise ValueError( "AutoClear bits shoould fit inside a single 32-bit word")
+                        raise ValueError( "AutoClear bits should fit inside a single word (of BUSWIDTH bits)")
                     # create the register
                     ac.append( regac( ioffset , istart, iwidth , Clk, Reset, A, WD, Wr, self._dict[key]['isig'] ) )
 
@@ -407,7 +332,7 @@ class ControlStatus(object):
                     raise ValueError( 'Unsupported register mode <{}>' .format( ccmode ))
 
             # assemble the readback vector
-            # by making a list and concatenating this into a wide vector
+            # by making a list and concatenating this into a wide vector adding zero padding bits in between non-contiguous objects
             # need to order things ...
             # extract a list of needed things, and sort it along the way
             rbl = sorted([ [val['offset'] , val['start'], val['width'], val['srcdst'], val['isig'], val['isout']] for val in self._dict.itervalues()])
@@ -415,10 +340,10 @@ class ControlStatus(object):
             ccassigns = []
             index = 0
             for item in rbl:
-                istart = item[0] * 32 + item[1]
+                istart = item[0] * self.BUSWIDTH + item[1]
                 if  istart > index:
                     # insert padding
-                    elements.append( Signal( intbv(0)[istart - index:]) )
+                    elements.append(  intbv(0)[istart - index:] )
                     index += istart - index
                 # insert the srcdst
                 if item[5] :
@@ -430,20 +355,20 @@ class ControlStatus(object):
 
                 index += item[2]
 
-            # may have to pad the end as well
-            padding = index % 32
+            # may have to pad the end(top) as well
+            padding = index % self.BUSWIDTH
             if padding:
                 # we're not on a boundary
-                elements.append( Signal( intbv(0)[32 - padding:]) )
+                elements.append(  intbv(0)[self.BUSWIDTH - padding:] )
 
             self.dr = ConcatSignal(*reversed(elements))
 
-        rdr = self._MMread(Clk, Reset, A, Rd, RQ)
+        rdr = self._MMread(Clk, Reset, A, Rd, RQ, self.BUSWIDTH)
 
         return rw, ro, roa, rwc, ac, ccassigns, rdr
 
     # not - public?
-    def _MMread(self, Clk, Reset, A, Rd, RQ):
+    def _MMread(self, Clk, Reset, A, Rd, RQ, BUSWIDTH):
         ''' our (Avalon MM) Master reading (back) '''
         # can use a 'brute force' memory read ...
         @always_seq(Clk.posedge, reset = Reset)
@@ -452,26 +377,121 @@ class ControlStatus(object):
                 RQ.next = 0
                 for i in range(len(self.regs)) :
                     if A == i :
-                        RQ.next = self.dr[(i+1)*32 : i * 32]
+                        RQ.next = self.dr[(i+1) * BUSWIDTH : i * BUSWIDTH]
 
         return mmrdr
 
     def genheaderfile(self):
-        '''  a C-type header file is always nice to have'''
+        '''  a C-type header file is always nice to have?'''
         #TODO:
         pass
 
 
-def flatten( lov, f):
-    @always_comb
-    def fl():
-        for i in range(len(lov)):
-            f.next[(i+1)*24:i*24] = lov[i]
-
-    return fl
 
 
-def tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2, Update, TestVector3,  Pulse, TestAutoClearBit, LargeVector, ListOfVectors, Status3, Pulse3):
+
+if __name__ == '__main__':
+    # extracted utility functions
+    def simulate( timesteps, mainclass ):
+        """Runs simulation for MyHDL Class"""
+        # Remove old vcd File, otherwise we get a list of renamed .vcd files lingering about
+        filename = ( mainclass.__name__ + ".vcd" )
+        if os.access( filename, os.F_OK ):
+            os.unlink( filename )
+
+        # Run Simulation
+        tb = traceSignals( mainclass )
+        sim = Simulation( tb )
+        sim.run( timesteps )
+
+
+    def genClk( Clk, tCK , ClkCount = None ):
+        """ generate a clock and possible associate a clockcounter with it """
+        while True:
+            Clk.next = 1
+            yield delay( int( tCK / 2 ) )
+            Clk.next = 0
+            if not ( ClkCount is None ):
+                ClkCount.next = ClkCount + 1
+            yield delay( int( tCK / 2 ) )
+
+
+    def genReset( Clk, tCK, Reset ):
+        """ although not strictly needed generates an asynchronous Reset with valid de-assert"""
+        Reset.next = 1
+        yield delay( int( tCK * 3.5 ) )
+        Reset.next = 0
+
+
+    def delayclks( Clk, tCK, count ):
+        """ delays 'count' 'Clk's """
+        for _ in range( count ):
+            yield Clk.posedge
+        yield delay( int( tCK / 4 ) )
+
+
+    def MMwrite( Clk, tCK, A, WD, Wr, offset , data, WaitRequest = None ):
+        """ write a register """
+        WD.next = data
+        A.next = offset
+        Wr.next = 1
+        if not ( WaitRequest is None ):
+            yield Clk.posedge
+            while WaitRequest:
+                yield Clk.posedge
+        else:
+            yield Clk.posedge
+
+        yield delay( int( tCK / 4 ) )
+        Wr.next = 0
+
+
+    def MMread( Clk, tCK, A, Rd , RQ, READ_DELAY, offset, WaitRequest = None, result = None ):
+        """ read a register
+             if waitrequest is used, READ_DELAY is ignored
+        """
+        A.next = offset
+        if WaitRequest is None:
+            Rd.next = 1
+            yield Clk.posedge
+            yield delay( int( tCK / 4 ) )
+            Rd.next = 0  # must be a single pulse
+            for _ in range( READ_DELAY ):
+                yield Clk.posedge
+            # only transfer after READ_DELAY
+            if not result is None:
+                result.next = RQ
+
+            yield delay( int( tCK / 4 ) )
+
+        else:
+            # here we hold Rd
+            Rd.next = 1
+            while WaitRequest:
+                yield Clk.posedge
+
+            if not result is None:
+                result.next = RQ
+
+            yield delay( int( tCK / 4 ) )
+            Rd.next = 0
+
+
+    def flatten( lov, f ):
+        WIDTH_V = len( lov[0] )
+        @always_comb
+        def fl():
+            for i in range( len( lov ) ):
+                f.next[( i + 1 ) * WIDTH_V:i * WIDTH_V] = lov[i]
+
+        return fl
+
+
+    WIDTH_A = 8
+    USE_LIST = True
+def tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2, Update,
+         TestVector3,  Pulse, TestAutoClearBit, LargeVector, FlattenedListOfVectors, Status3, Pulse3,
+         SingleReadOnlyBit, SingleROIntbvBit):
     ''' a routine to actually build a csr
         both for Simulation and Conversion
     '''
@@ -480,6 +500,7 @@ def tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, Te
     # as this is top file to be converted
     llov = [Signal(intbv(0)[24:]) for _ in range(3)]
 
+    # we have two ways to build a registerfile
     if not USE_LIST:
         # initialise the control/status object
         csr = ControlStatus()
@@ -493,10 +514,12 @@ def tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, Te
         # unfortunately Signals have no name assigned here, so we still need the 'double' reference
         csr.addentry('TestBit'            ,  0,    0, 'WriteRead'             , TestBit)
         csr.addentry('TestAutoClearBit'   ,  0,    2, 'AutoClear'             , TestAutoClearBit)
+        csr.addentry('SingleReadOnlyBit'  ,  0,    4, 'ReadOnly'              , SingleReadOnlyBit)
+        csr.addentry('SingleROIntbvBit'   ,  0,    5, 'ReadOnly'              , SingleROIntbvBit)
         csr.addentry('TestVector'         ,  1,    0, 'WriteRead'             , TestVector )
         csr.addentry('TestVector2'        ,  1,   16, 'WriteRead'             , TestVector2 )
         csr.addentry('Status'             ,  2,    0, 'ReadOnly'              , Status)
-        # large parameters (> 32 bits) have to start from 0
+        # large parameters (> BUSWIDTH bits) have to start from 0
         csr.addentry('LargeVector'        ,  3,    0, 'WriteRead'             , LargeVector )
         csr.addentry('Status2'            ,  6,    0, 'ReadOnlyAck'           , Status2, Pulse)
         csr.addentry('Status3'            ,  7,    0, 'ReadOnlyWriteClear'    , Status3, Pulse3)
@@ -507,19 +530,21 @@ def tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, Te
         # unless it is a list of equal dimension too (Tip: specify None for unused ones)
         csr.addentry('ListOfVectors'      , 10,    0, 'WriteRead'             , llov, [None, Update, None])
         # Finally we have some 'constant' data, like e.g. Version Numbers
-        csr.addentry('41'                 ,  0,   16, 'ReadOnly'              , (42,8)) # "0100_0010") # trying a constant !this is now broken!
+        csr.addentry('42'                 ,  0,   16, 'ReadOnly'              , (42,8)) # "0100_0010") # trying a constant !this is now broken!
         csr.addentry('BitString'          ,  0,   24, 'ReadOnly'              , intbv("0100_0010"))
         csr.addentry('MyHDL'              , 13,    0, 'ReadOnly'              , ('MyHDL0.9', 64)) # trying another constant
         csr.addentry('C-Cam'              , 15,    0, 'ReadOnly'              , ('Ccam', 32)) # trying another constant
 
     else:
-        # build a list of descriptors
+        # use a list of descriptors
         description =  (('TestBit'            ,  0,    0, 'WriteRead'             , TestBit),
                         ('TestAutoClearBit'   ,  0,    2, 'AutoClear'             , TestAutoClearBit),
+                        ('SingleReadOnlyBit'  ,  0,    4, 'ReadOnly'              , SingleReadOnlyBit),
+                        ('SingleROIntbvBit'   ,  0,    5, 'ReadOnly'              , SingleROIntbvBit),
                         ('TestVector'         ,  1,    0, 'WriteRead'             , TestVector ),
                         ('TestVector2'        ,  1,   16, 'WriteRead'             , TestVector2 ),
                         ('Status'             ,  2,    0, 'ReadOnly'              , Status),
-                        # large parameters (> 32 bits) have to start from 0
+                        # large parameters (> 'BUSWIDTH' bits) have to start from 0
                         ('LargeVector'        ,  3,    0, 'WriteRead'             , LargeVector ),
                         ('Status2'            ,  6,    0, 'ReadOnlyAck'           , Status2, Pulse),
                         ('Status3'            ,  7,    0, 'ReadOnlyWriteClear'    , Status3, Pulse3),
@@ -530,26 +555,50 @@ def tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, Te
                         # unless it is a list of equal dimension too (Tip: specify None for unused ones)
                         ('ListOfVectors'      , 10,    0, 'WriteRead'             , llov, [None, Update, None]),
                         # Finally we have some 'constant' data, like e.g. Version Numbers
-                        ('41'                 ,  0,   16, 'ReadOnly'              , (42,8)), # "0100_0010") # trying a constant !this is now broken!
+                        ('42'                 ,  0,   16, 'ReadOnly'              , (42,8)),
+                        # specifying "0100_0010" directly doesn't work as it will be interpreted as a general string
                         ('BitString'          ,  0,   24, 'ReadOnly'              , intbv("0100_0010")),
-                        ('MyHDL'              , 13,    0, 'ReadOnly'              , ('MyHDL0.9', 64)), # trying another constant
-                        ('C-Cam'              , 15,    0, 'ReadOnly'              , ('Ccam', 32)) # trying another constant
+                        # some general strings
+                        ('MyHDL'              , 13,    0, 'ReadOnly'              , ('MyHDL0.9', 64)),
+                        ('C-Cam'              , 15,    0, 'ReadOnly'              , ('Ccam', 32)) # yes, that's us!
                        )
         # and pass this list to the constructor
         csr = ControlStatus( description )
 
     # this will build the control and status register
-    # at the moment the width of A is a chicken-or-egg issue
+    # at the moment the width of A is a chicken-or-egg issue, i.o.w. you have to check it
     control = csr.build(Clk, Reset, A, WD, Wr, Rd, RQ)
     # flatten the generated ListOfVectors in to one vector
     # this is only required here as this is a top-level module
-    mimic = flatten( llov, ListOfVectors )
+    mimic = flatten( llov, FlattenedListOfVectors )
 
     return control, mimic
 
-def test_ControlStatus():
-    dut = tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update, TestVector3, Pulse, TestAutoClearBit, LargeVector, ListOfVectors, Status3, Pulse3)
+def tb_ControlStatus():
+    Clk                     =  Signal(bool(0))
+    Reset                   =  ResetSignal(0, active=1, async=True)
+    A                       =  Signal(intbv(0)[WIDTH_A:])
+    WD, RQ                  = [Signal(intbv(0)[32:]) for _ in range(2)]
+    Wr , Rd                 = [Signal(bool(0)) for _ in range(2)]
+    Status                  =  Signal(intbv(0)[32:])
+    Status2                 =  Signal(intbv(0)[32:])
+    Pulse                   =  Signal(bool(0))
+    Status3                 =  Signal(intbv(0)[16:])
+    Pulse3                  =  Signal(bool(0))
+    TestAutoClearBit        =  Signal(bool(0))
+    TestBit                 =  Signal(bool(0))
+    TestVector              =  Signal(intbv(0)[10:])
+    TestVector2             =  Signal(intbv(0)[16:])
+    TestVector3             =  Signal(intbv(0)[32:])
+    LargeVector             =  Signal(intbv(0)[72:])
+    FlattenedListOfVectors  =  Signal(intbv(0)[3 * 24:])
+    Update                  =  Signal(bool(0))
+    SingleReadOnlyBit       =  Signal(bool(0))
+    SingleROIntbvBit        =  Signal(intbv(0)[1:])
 
+    dut = tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update,
+               TestVector3, Pulse, TestAutoClearBit, LargeVector, FlattenedListOfVectors, Status3, Pulse3,
+               SingleReadOnlyBit, SingleROIntbvBit)
     ClkCount = Signal( intbv( 0 )[32:])
     tCK = 20
 
@@ -593,7 +642,7 @@ def test_ControlStatus():
         for i in range(16):
             yield MMread(Clk, tCK, A, Rd, RQ, 1, i, None, None)
             if RQ != cd[i]:
-                print( "Fail at offset {}: {} <> {}" .format(i, cd[i], hex(RQ)) )
+                print( "Fail at offset {}: expected {} <> received {}" .format(i, cd[i], hex(RQ)) )
 
         raise StopSimulation
 
@@ -601,20 +650,6 @@ def test_ControlStatus():
 
 
 def convert():
-
-    # As this is an 'internal module' ( i.e. not exposed to Qsys)
-    # we can stick to use unsigned vectors as  ports
-    # but eventually some of the ports will come from the top-level module (exposed to Qsys)
-    # and will not be 'numeric'
-    # Force std_logic_vector ports instead of unsigned ports
-    toVHDL.numeric_ports = False
-    # Convert
-    toVHDL(tcsr, Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update, TestVector3, Pulse, TestAutoClearBit, LargeVector, ListOfVectors, Status3, Pulse3)
-#     toVerilog(tcsr, Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update, TestVector3, Pulse, TestAutoClearBit, LargeVector, ListOfVectors, Status3, Pulse3)
-
-
-if __name__ == '__main__':
-    WIDTH_A = 8
 
     Clk                 = Signal(bool(0))
     Reset               = ResetSignal(0, active=1, async=True)
@@ -632,12 +667,28 @@ if __name__ == '__main__':
     TestVector2         = Signal(intbv(0)[16:])
     TestVector3         = Signal(intbv(0)[32:])
     LargeVector         = Signal(intbv(0)[72:])
-    ListOfVectors       = Signal(intbv(0)[3 * 24:])
+    FlattenedListOfVectors  =  Signal(intbv(0)[3 * 24:])
     Update              = Signal(bool(0))
+    SingleReadOnlyBit       =  Signal(bool(0))
+    SingleROIntbvBit        =  Signal(intbv(0)[1:])
 
-    USE_LIST = True
+    # As this is an 'internal module' ( i.e. not exposed to Qsys)
+    # we can stick to use unsigned vectors as ports
+    # but eventually some of the ports will come from the top-level module (exposed to Qsys)
+    # and will not be 'numeric'
+        # Force std_logic_vector ports instead of unsigned ports
+    toVHDL.std_logic_ports = True
+    # Convert
+    toVHDL(tcsr, Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update,
+           TestVector3, Pulse, TestAutoClearBit, LargeVector, FlattenedListOfVectors, Status3, Pulse3,
+           SingleReadOnlyBit, SingleROIntbvBit)
+    toVerilog(tcsr, Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, TestVector2,  Update,
+              TestVector3, Pulse, TestAutoClearBit, LargeVector, FlattenedListOfVectors, Status3, Pulse3,
+              SingleReadOnlyBit, SingleROIntbvBit)
 
-    simulate(3000, test_ControlStatus)
+
+    simulate(3000, tb_ControlStatus)
     convert()
-    print 'All done!'
+    print('All done!')
+    sys.exit(0)
 
