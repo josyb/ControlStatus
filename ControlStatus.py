@@ -294,7 +294,7 @@ class ControlStatus(object):
                 elif ccmode == 'ReadOnly':
                     # we insert the readonly object (signal, intbv, str) in the readback vector
                     if isinstance(srcdst, tuple):
-                        if isinstance(srcdst[0], (int, long)):
+                        if isinstance(srcdst[0], int):
                             # make an intbv
                             self._dict[key].update( { 'srcdst' :  intbv( srcdst[0] )[iwidth:] } )
 
