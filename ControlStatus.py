@@ -335,7 +335,7 @@ class ControlStatus(object):
             # by making a list and concatenating this into a wide vector adding zero padding bits in between non-contiguous objects
             # need to order things ...
             # extract a list of needed things, and sort it along the way
-            rbl = sorted([ [val['offset'] , val['start'], val['width'], val['srcdst'], val['isig'], val['isout']] for val in self._dict.itervalues()])
+            rbl = sorted([ [val['offset'] , val['start'], val['width'], val['srcdst'], val['isig'], val['isout']] for val in self._dict.values()])
             elements = []
             ccassigns = []
             index = 0
