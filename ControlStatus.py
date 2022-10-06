@@ -165,7 +165,7 @@ class ControlStatus(object):
         if isinstance(srcdst,list):
             lenlov    = len(srcdst)
             lenvector = len(srcdst[0])
-            lenentry  = (lenvector + self.BUSWIDTH - 1) / self.BUSWIDTH
+            lenentry  = (lenvector + self.BUSWIDTH - 1) // self.BUSWIDTH
             lenregs   = lenlov * lenentry
             # see if we have to extend
             if len(self.regs) < (offset + lenregs):
@@ -211,16 +211,16 @@ class ControlStatus(object):
             if isinstance(srcdst, (int, tuple)):
                 # get length from second element in tuple
                 lenvector = srcdst[1]
-                lenregs = (lenvector + self.BUSWIDTH - 1) / self.BUSWIDTH
+                lenregs = (lenvector + self.BUSWIDTH - 1) // self.BUSWIDTH
 
             elif isinstance(srcdst, intbv):
                 # receiving a bitstring, already converted by MyHDL intbv()
                 lenvector = len(srcdst)
-                lenregs = (lenvector + self.BUSWIDTH - 1) / self.BUSWIDTH
+                lenregs = (lenvector + self.BUSWIDTH - 1) // self.BUSWIDTH
 
             else:
                 lenvector = len(srcdst)
-                lenregs = (lenvector + self.BUSWIDTH - 1) / self.BUSWIDTH
+                lenregs = (lenvector + self.BUSWIDTH - 1) // self.BUSWIDTH
 
             # see if we have to extend
             if len(self.regs) < (offset + lenregs):
