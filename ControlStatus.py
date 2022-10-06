@@ -576,7 +576,7 @@ def tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, Te
 
 def tb_ControlStatus():
     Clk                     =  Signal(bool(0))
-    Reset                   =  ResetSignal(0, active=1, async=True)
+    Reset                   =  ResetSignal(0, active=1, isasync=True)
     A                       =  Signal(intbv(0)[WIDTH_A:])
     WD, RQ                  = [Signal(intbv(0)[32:]) for _ in range(2)]
     Wr , Rd                 = [Signal(bool(0)) for _ in range(2)]
@@ -652,7 +652,7 @@ def tb_ControlStatus():
 def convert():
 
     Clk                 = Signal(bool(0))
-    Reset               = ResetSignal(0, active=1, async=True)
+    Reset               = ResetSignal(0, active=1, isasync=True)
     A                   = Signal(intbv(0)[WIDTH_A:])
     WD, RQ              = [Signal(intbv(0)[32:]) for _ in range(2)]
     Wr , Rd             = [Signal(bool(0)) for _ in range(2)]
