@@ -43,8 +43,8 @@ def regrw( OFFSET, LENGTH, START, WIDTH, Clk, Reset, A, WD, Wr, Q, Pulse = None,
                 if Wr and A == OFFSET +i:
                     if i != (WIDTH + BUSWIDTH - 1) // BUSWIDTH - 1:
                         Q.next[(i+1) * BUSWIDTH : i * BUSWIDTH] = WD
-                        else:
-                            # may have to assign a slice for the last iteration
+                    else:
+                        # may have to assign a slice for the last iteration
                         Q.next[:(WIDTH // BUSWIDTH) * BUSWIDTH] = WD[WIDTH % BUSWIDTH:]
     else :
         @always_seq( Clk.posedge, reset = Reset)
@@ -687,8 +687,8 @@ def convert():
               SingleReadOnlyBit, SingleROIntbvBit)
 
 
-    simulate(3000, tb_ControlStatus)
-    convert()
-    print('All done!')
-    sys.exit(0)
+simulate(3000, tb_ControlStatus)
+convert()
+print('All done!')
+sys.exit(0)
 
