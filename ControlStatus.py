@@ -43,8 +43,8 @@ def regrw( OFFSET, LENGTH, START, WIDTH, Clk, Reset, A, WD, Wr, Q, Pulse = None,
                 if Wr and A == OFFSET +i:
                     if i != (WIDTH + BUSWIDTH - 1) // BUSWIDTH - 1:
                         Q.next[(i+1) * BUSWIDTH : i * BUSWIDTH] = WD
-                        else:
-                            # may have to assign a slice for the last iteration
+                    else:
+                        # may have to assign a slice for the last iteration
                         Q.next[:(WIDTH // BUSWIDTH) * BUSWIDTH] = WD[WIDTH % BUSWIDTH:]
     else :
         @always_seq( Clk.posedge, reset = Reset)
@@ -165,7 +165,7 @@ class ControlStatus(object):
         if isinstance(srcdst,list):
             lenlov    = len(srcdst)
             lenvector = len(srcdst[0])
-            lenentry  = (lenvector + self.BUSWIDTH - 1) / self.BUSWIDTH
+            lenentry  = (lenvector + self.BUSWIDTH - 1) // self.BUSWIDTH
             lenregs   = lenlov * lenentry
             # see if we have to extend
             if len(self.regs) < (offset + lenregs):
@@ -211,16 +211,16 @@ class ControlStatus(object):
             if isinstance(srcdst, (int, tuple)):
                 # get length from second element in tuple
                 lenvector = srcdst[1]
-                lenregs = (lenvector + self.BUSWIDTH - 1) / self.BUSWIDTH
+                lenregs = (lenvector + self.BUSWIDTH - 1) // self.BUSWIDTH
 
             elif isinstance(srcdst, intbv):
                 # receiving a bitstring, already converted by MyHDL intbv()
                 lenvector = len(srcdst)
-                lenregs = (lenvector + self.BUSWIDTH - 1) / self.BUSWIDTH
+                lenregs = (lenvector + self.BUSWIDTH - 1) // self.BUSWIDTH
 
             else:
                 lenvector = len(srcdst)
-                lenregs = (lenvector + self.BUSWIDTH - 1) / self.BUSWIDTH
+                lenregs = (lenvector + self.BUSWIDTH - 1) // self.BUSWIDTH
 
             # see if we have to extend
             if len(self.regs) < (offset + lenregs):
@@ -294,7 +294,7 @@ class ControlStatus(object):
                 elif ccmode == 'ReadOnly':
                     # we insert the readonly object (signal, intbv, str) in the readback vector
                     if isinstance(srcdst, tuple):
-                        if isinstance(srcdst[0], (int, long)):
+                        if isinstance(srcdst[0], int):
                             # make an intbv
                             self._dict[key].update( { 'srcdst' :  intbv( srcdst[0] )[iwidth:] } )
 
@@ -335,7 +335,7 @@ class ControlStatus(object):
             # by making a list and concatenating this into a wide vector adding zero padding bits in between non-contiguous objects
             # need to order things ...
             # extract a list of needed things, and sort it along the way
-            rbl = sorted([ [val['offset'] , val['start'], val['width'], val['srcdst'], val['isig'], val['isout']] for val in self._dict.itervalues()])
+            rbl = sorted([ [val['offset'] , val['start'], val['width'], val['srcdst'], val['isig'], val['isout']] for val in self._dict.values()])
             elements = []
             ccassigns = []
             index = 0
@@ -576,7 +576,7 @@ def tcsr(Clk, Reset, A, WD, Wr, Rd, RQ, Status, Status2, TestBit, TestVector, Te
 
 def tb_ControlStatus():
     Clk                     =  Signal(bool(0))
-    Reset                   =  ResetSignal(0, active=1, async=True)
+    Reset                   =  ResetSignal(0, active=1, isasync=True)
     A                       =  Signal(intbv(0)[WIDTH_A:])
     WD, RQ                  = [Signal(intbv(0)[32:]) for _ in range(2)]
     Wr , Rd                 = [Signal(bool(0)) for _ in range(2)]
@@ -652,7 +652,7 @@ def tb_ControlStatus():
 def convert():
 
     Clk                 = Signal(bool(0))
-    Reset               = ResetSignal(0, active=1, async=True)
+    Reset               = ResetSignal(0, active=1, isasync=True)
     A                   = Signal(intbv(0)[WIDTH_A:])
     WD, RQ              = [Signal(intbv(0)[32:]) for _ in range(2)]
     Wr , Rd             = [Signal(bool(0)) for _ in range(2)]
@@ -687,8 +687,8 @@ def convert():
               SingleReadOnlyBit, SingleROIntbvBit)
 
 
-    simulate(3000, tb_ControlStatus)
-    convert()
-    print('All done!')
-    sys.exit(0)
+simulate(3000, tb_ControlStatus)
+convert()
+print('All done!')
+sys.exit(0)
 
